@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+import sys
+from datetime import date
+from pathlib import Path
+from typing import Any, Dict, List
+
+import pandas as pd
+import streamlit as st
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = PROJECT_ROOT.parent
+if str(WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_ROOT))
+
+from Stock_Program_V4.api.kis_client import KisClient
+from Stock_Program_V4.core.config import ConfigError, get_kis_config
+from Stock_Program_V4.core.data_fetcher import DataFetcher
+from Stock_Program_V4.core.market_scanner import MarketScanner
+from Stock_Program_V4.core.strategy import P1Strategy, P2Strategy, P3Strategy
+from Stock_Program_V4.core.utils import TickerLoadError, load_tickers
+from Stock_Program_V4.ui.formatters import format_failures, format_results, format_sectors
+
+
+class StreamlitUI:
+    def __init__(self, scanner: MarketScanner) -> None:
+        self.scanner = scanner
+
+    def select_date(self) -> date:
+        return st.sidebar.date_input("분석 기준일", value=date.today())
+
+    def click_scan(self) -> bool:
+        return st.sidebar.button("스캔 시작", type="primary", use_container_width=True)
+
+    def render_results(
+        self,
+        results: pd.DataFrame,
+        sectors: List[Dict[str, Any]],
+        failures: List[Dict[str, Any]],
+    ) -> None:
+        summary_cols = st.columns(3)
+        summary_cols[0].metric("선별 종목", len(results))
+        summary_cols[1].metric("주도 섹터", len(sectors))
+        summary_cols[2].metric("분석 실패", len(failures))
+
+        st.subheader("주도 섹터")
+        sector_table = format_sectors(sectors)
+        if sector_table.empty:
+            st.info("P1/P2 조건을 만족한 섹터가 없습니다.")
+        else:
+            st.dataframe(sector_table, use_container_width=True, hide_index=True)
+
+        st.subheader("선별 종목")
+        result_table = format_results(results)
+        if result_table.empty:
+            st.info("조건을 만족한 종목이 없습니다.")
+        else:
+            st.dataframe(result_table, use_container_width=True, hide_index=True)
+
+        if failures:
+            st.subheader("분석 실패 종목")
+            st.warning("일부 종목은 데이터 부족, API 응답 오류, 휴장일 데이터 부재 등으로 제외되었습니다.")
+            with st.expander("실패 상세 보기", expanded=True):
+                st.dataframe(format_failures(failures), use_container_width=True, hide_index=True)
+
+
+@st.cache_resource
+def build_scanner() -> MarketScanner:
+    settings = get_kis_config()
+    kis_client = KisClient.get_instance(
+        app_key=settings["app_key"],
+        app_secret=settings["app_secret"],
+        acc_no=settings["acc_no"],
+        mock=settings["mock"],
+    )
+    data_fetcher = DataFetcher(kis_client=kis_client)
+    return MarketScanner(
+        data_fetcher=data_fetcher,
+        strategies=[P1Strategy(), P2Strategy(), P3Strategy()],
+    )
+
+
+def main() -> None:
+    st.set_page_config(page_title="Stock Program V4", layout="wide")
+    st.title("Stock Program V4")
+
+    try:
+        scanner = build_scanner()
+    except ConfigError as exc:
+        st.error(str(exc))
+        st.stop()
+
+    ui = StreamlitUI(scanner)
+    selected_date = ui.select_date()
+    market_type = st.sidebar.selectbox("시장", options=["KOSPI", "KOSDAQ"])
+    top_n = st.sidebar.number_input("스캔 종목 수", min_value=1, max_value=300, value=100, step=10)
+    max_workers = st.sidebar.slider("동시 처리 수", min_value=1, max_value=20, value=10)
+
+    st.caption(f"선택 기준일: {selected_date.isoformat()}")
+
+    if not ui.click_scan():
+        st.info("사이드바에서 조건을 선택한 뒤 스캔을 시작하세요.")
+        return
+
+    try:
+        tickers = load_tickers(market_type=market_type, top_n=int(top_n))
+    except TickerLoadError as exc:
+        st.error(str(exc))
+        return
+
+    if tickers.empty:
+        st.warning("선택한 조건에 해당하는 종목 목록이 없습니다.")
+        return
+
+    progress_bar = st.progress(0)
+    status = st.empty()
+
+    def update_progress(progress: float, message: str) -> None:
+        progress_bar.progress(min(1.0, max(0.0, progress)))
+        status.text(message)
+
+    with st.spinner("종목 데이터를 수집하고 전략을 적용하는 중입니다."):
+        scan_result = scanner.run_scan(
+            tickers=tickers,
+            max_workers=int(max_workers),
+            progress_callback=update_progress,
+        )
+
+    progress_bar.progress(1.0)
+    status.text("스캔 완료")
+    ui.render_results(
+        results=scan_result["results"],
+        sectors=scan_result["sectors"],
+        failures=scan_result["failures"],
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import List, Optional, any, Dict, Union
+import pandas as pd
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_TICKERS_FILE = PROJECT_ROOT / "tickers.json"
+
+
+class TickerLoadError(Exception):
+    """종목 메타데이터를 로드하는 중 발생하는 예외"""
+    pass
+
+def load_tickers(market_type: List[str], top_n: int = 100) -> pd.DataFrame:
+    """
+    여러 시장(KOSPI, KOSDAQ 등)의 종목 데이터를 각각 읽어와 병합(concat)합니다.
+    """
+    # 1. 파일 경로 탐색
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    file_path = os.path.join(base_dir, 'tickers.json')
+    
+    if not os.path.exists(file_path):
+        raise TickerLoadError(f"종목 리스트 파일을 찾을 수 없습니다: {file_path}")
+        
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            df_all = pd.DataFrame(data)
+            
+            market_frames = []
+            
+            # 2. [핵심 수정] 리스트를 순회하며 각각 필터링 (== 비교 오류 해결)
+            for m_type in market_type:
+                # 각 시장(m_type)과 정확히 일치하는 문자열 비교
+                df_market = df_all[df_all['market'] == m_type]
+                # 각 시장별로 상위 top_n개 추출하여 리스트에 담기
+                market_frames.append(df_market.head(top_n).copy())
+                
+            # 3. 데이터가 없으면 빈 데이터프레임 반환
+            if not market_frames:
+                return pd.DataFrame()
+                
+            # 4. 병합 (Facade 패턴 적용)
+            result_df = pd.concat(market_frames, ignore_index=True)
+            return result_df
+            
+    except json.JSONDecodeError:
+        raise TickerLoadError("tickers.json 파일의 형식이 올바르지 않습니다.")
+    except Exception as e:
+        raise TickerLoadError(f"종목 로드 중 예상치 못한 에러 발생: {e}")

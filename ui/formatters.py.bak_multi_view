@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+from typing import Any, List
+
+import pandas as pd
+
+
+def format_won(value: Any) -> str:
+    amount = _to_float(value)
+    if amount == 0:
+        return "0"
+    if abs(amount) >= 100_000_000:
+        return f"{amount / 100_000_000:,.1f}억"
+    return f"{amount:,.0f}원"
+
+
+def format_percent(value: Any) -> str:
+    return f"{_to_float(value):.2f}%"
+
+
+def format_results(results: pd.DataFrame) -> pd.DataFrame:
+    if results.empty:
+        return pd.DataFrame()
+
+    display = results.copy()
+    columns = {
+        "code": "종목코드",
+        "name": "종목명",
+        "market": "시장",
+        "current_price": "현재가",
+        "change_rate": "등락률",
+        "market_cap": "시가총액",
+        "contribution_score": "기여점수",
+        "is_p1": "P1",
+        "is_p2": "P2",
+        "is_p3": "P3",
+    }
+    selected = [column for column in columns if column in display.columns]
+    display = display[selected].rename(columns=columns)
+
+    for column in ("현재가", "시가총액", "기여점수"):
+        if column in display.columns:
+            display[column] = display[column].map(format_won)
+    if "등락률" in display.columns:
+        display["등락률"] = display["등락률"].map(format_percent)
+    for column in ("P1", "P2", "P3"):
+        if column in display.columns:
+            display[column] = display[column].map(lambda value: "Y" if bool(value) else "-")
+
+    return display
+
+def format_failures(failures: List[Dict[str, Any]]) -> pd.DataFrame:
+    if not failures:
+        return pd.DataFrame()
+    return pd.DataFrame(failures).rename(
+        columns={
+            "code": "종목코드",
+            "name": "종목명",
+            "error_type": "오류 유형",
+            "message": "상세 사유",
+        }
+    )
+
+
+def _to_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0

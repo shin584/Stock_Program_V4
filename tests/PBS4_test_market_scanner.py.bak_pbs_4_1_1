@@ -1,0 +1,128 @@
+import json
+
+import pandas as pd
+
+from Stock_Program_V4.core.data_fetcher import (
+    CHANGE_RATE_COL,
+    CLOSE_COL,
+    FOREIGN_NET_AMOUNT_COL,
+    INSTITUTION_NET_AMOUNT_COL,
+    TRADE_VALUE_COL,
+    VOLUME_COL,
+    DataNotSufficientError,
+)
+from Stock_Program_V4.core.market_scanner import MarketScanner
+from Stock_Program_V4.core.strategy import P1Strategy, P2Strategy, P3Strategy
+from Stock_Program_V4.core.utils import load_tickers
+
+
+class FakeDataFetcher:
+    def __init__(self, frames, failing_codes=None):
+        self.frames = frames
+        self.failing_codes = set(failing_codes or [])
+        self.requested_codes = []
+
+    def get_and_process_data(self, ticker):
+        self.requested_codes.append(ticker)
+        if ticker in self.failing_codes:
+            raise DataNotSufficientError("sample data is insufficient")
+        return self.frames[ticker].copy()
+
+
+def _leader_frame(change_rate=3.0):
+    rows = 20
+    return pd.DataFrame(
+        {
+            CLOSE_COL: [100 + i for i in range(rows)],
+            CHANGE_RATE_COL: [change_rate] * rows,
+            TRADE_VALUE_COL: [200 * 100_000_000] * rows,
+            VOLUME_COL: [1_000] * (rows - 1) + [1_600],
+            FOREIGN_NET_AMOUNT_COL: [0] * rows,
+            INSTITUTION_NET_AMOUNT_COL: [0] * 17 + [40 * 100_000_000] * 3,
+        }
+    )
+
+
+def test_run_scan_uses_injected_fetcher_and_isolates_failures():
+    tickers = [
+        {"code": "000001", "name": "Alpha", "market": "KOSPI", "sector": "Tech", "cap": 1_000_000_000},
+        {"code": "000002", "name": "Broken", "market": "KOSPI", "sector": "Bio", "cap": 1_000_000_000},
+    ]
+    fetcher = FakeDataFetcher(
+        frames={"000001": _leader_frame()},
+        failing_codes={"000002"},
+    )
+    scanner = MarketScanner(
+        data_fetcher=fetcher,
+        strategies=[P1Strategy(), P2Strategy(), P3Strategy()],
+    )
+
+    scan = scanner.run_scan(tickers, max_workers=2)
+
+    assert sorted(fetcher.requested_codes) == ["000001", "000002"]
+    assert len(scan["results"]) == 1
+    assert scan["results"].iloc[0]["code"] == "000001"
+    assert bool(scan["results"].iloc[0]["is_p1"]) is True
+    assert bool(scan["results"].iloc[0]["is_p2"]) is True
+    assert len(scan["failures"]) == 1
+    assert scan["failures"][0]["code"] == "000002"
+    assert scan["failures"][0]["error_type"] == "DataNotSufficientError"
+
+
+def test_aggregate_top_sectors_counts_only_p1_and_p2_leaders():
+    scanner = MarketScanner(
+        data_fetcher=FakeDataFetcher(frames={}),
+        strategies=[P1Strategy()],
+    )
+    results = pd.DataFrame(
+        [
+            {"sector": "Tech", "is_p1": True, "is_p2": False},
+            {"sector": "Tech", "is_p1": False, "is_p2": True},
+            {"sector": "Bio", "is_p1": True, "is_p2": False},
+            {"sector": "Ship", "is_p1": False, "is_p2": True},
+            {"sector": "Retail", "is_p1": False, "is_p2": False},
+        ]
+    )
+
+    sectors = scanner.aggregate_top_sectors(results)
+
+    assert sectors == [
+        {"sector": "Tech", "leader_count": 2},
+        {"sector": "Bio", "leader_count": 1},
+        {"sector": "Ship", "leader_count": 1},
+    ]
+
+
+def test_load_tickers_is_separated_from_market_scanner(tmp_path):
+    tickers_path = tmp_path / "tickers.json"
+    tickers_path.write_text(
+        json.dumps(
+            [
+                {"code": "000001", "name": "Alpha", "market": "KOSPI"},
+                {"code": "000002", "name": "Beta", "market": "KOSDAQ"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    tickers = load_tickers(market_type="KOSPI", top_n=1, file_path=tickers_path)
+
+    assert tickers.to_dict(orient="records") == [
+        {"code": "000001", "name": "Alpha", "market": "KOSPI"}
+    ]
+
+r'''
+테스트 결과:
+
+python -m py_compile Stock_Program_V4\core\utils.py Stock_Program_V4\core\market_scanner.py Stock_Program_V4\tests\PBS4_test_market_scanner.py
+# 통과
+
+python -m pytest Stock_Program_V4\tests\PBS4_test_market_scanner.py -q
+...                                                                      [100%]
+3 passed in 1.25s
+
+python -m pytest Stock_Program_V4\tests\PBS2_test_data_fetcher.py Stock_Program_V4\tests\PBS3_test_strategy.py Stock_Program_V4\tests\PBS4_test_market_scanner.py -q
+............                                                             [100%]
+12 passed, 2 warnings in 1.40s
+참고로 warnings 2건은 기존 PBS2/PBS3 테스트 파일 안의 Windows 경로 문자열 escape 경고이며, PBS-4 실패는 아닙니다.
+'''

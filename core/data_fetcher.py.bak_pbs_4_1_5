@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+from typing import Any, Dict, Iterable, List, Optional
+
+import pandas as pd
+
+from .config import get_kis_config
+from ..api.kis_client import KisClient
+
+
+DATE_COL = "\uc77c\uc790"
+CLOSE_COL = "\uc885\uac00"
+OPEN_COL = "\uc2dc\uac00"
+HIGH_COL = "\uace0\uac00"
+LOW_COL = "\uc800\uac00"
+VOLUME_COL = "\uac70\ub798\ub7c9"
+TRADE_VALUE_COL = "\uac70\ub798\ub300\uae08"
+CHANGE_RATE_COL = "\ub4f1\ub77d\ub960"
+PERSONAL_NET_AMOUNT_COL = "\uac1c\uc778_\uc21c\ub9e4\uc218\uae08\uc561"
+FOREIGN_NET_AMOUNT_COL = "\uc678\uad6d\uc778_\uc21c\ub9e4\uc218\uae08\uc561"
+INSTITUTION_NET_AMOUNT_COL = "\uae30\uad00_\uc21c\ub9e4\uc218\uae08\uc561"
+PERSONAL_NET_QTY_COL = "\uac1c\uc778_\uc21c\ub9e4\uc218\uc218\ub7c9"
+FOREIGN_NET_QTY_COL = "\uc678\uad6d\uc778_\uc21c\ub9e4\uc218\uc218\ub7c9"
+INSTITUTION_NET_QTY_COL = "\uae30\uad00_\uc21c\ub9e4\uc218\uc218\ub7c9"
+
+
+class DataNotSufficientError(Exception):
+    """Raised when market data is missing fields required for analysis."""
+
+
+class DataFetcher:
+    """Fetch KIS market JSON and normalize it into an analysis-ready DataFrame."""
+
+    def __init__(self, kis_client: Optional[KisClient] = None) -> None:
+        if kis_client is not None:
+            self.kis_client = kis_client
+            return
+
+        config = get_kis_config()
+        self.kis_client = KisClient.get_instance(**config)
+
+    def get_and_process_data(self, ticker: str) -> pd.DataFrame:
+        """Return a normalized DataFrame with price, investor, MA, and MACD columns."""
+        normalized_ticker = str(ticker).strip() if ticker is not None else ""
+        if not normalized_ticker:
+            raise DataNotSufficientError("Ticker must not be empty.")
+
+        raw_data = self.kis_client.fetch_market_data(normalized_ticker)
+        if not isinstance(raw_data, dict):
+            raise DataNotSufficientError("KIS response must be a JSON object.")
+
+        price_df = self._build_price_frame(raw_data.get("price"))
+        investor_df = self._build_investor_frame(raw_data.get("investor"))
+        df = self._merge_frames(price_df, investor_df)
+        return self._calculate_indicators(df)
+
+    def _build_price_frame(self, payload: Any) -> pd.DataFrame:
+        records = self._extract_records(payload, preferred_keys=("output2", "output"))
+        if not records:
+            raise DataNotSufficientError("Price data is empty.")
+
+        df = pd.DataFrame(records).rename(
+            columns={
+                "stck_bsop_date": DATE_COL,
+                "stck_clpr": CLOSE_COL,
+                "stck_prpr": CLOSE_COL,
+                "stck_oprc": OPEN_COL,
+                "stck_hgpr": HIGH_COL,
+                "stck_lwpr": LOW_COL,
+                "acml_vol": VOLUME_COL,
+                "acml_tr_pbmn": TRADE_VALUE_COL,
+                "prdy_ctrt": CHANGE_RATE_COL,
+            }
+        )
+
+        if DATE_COL in df.columns:
+            df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
+            df = df.dropna(subset=[DATE_COL]).set_index(DATE_COL).sort_index()
+
+        numeric_columns = (
+            CLOSE_COL,
+            OPEN_COL,
+            HIGH_COL,
+            LOW_COL,
+            VOLUME_COL,
+            TRADE_VALUE_COL,
+            CHANGE_RATE_COL,
+        )
+        df = self._coerce_numeric(df, numeric_columns)
+
+        if CHANGE_RATE_COL not in df.columns and CLOSE_COL in df.columns:
+            df[CHANGE_RATE_COL] = df[CLOSE_COL].pct_change().mul(100).fillna(0)
+
+        return df
+
+    def _build_investor_frame(self, payload: Any) -> pd.DataFrame:
+        records = self._extract_records(payload, preferred_keys=("output", "output2"))
+        if not records:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(records).rename(
+            columns={
+                "stck_bsop_date": DATE_COL,
+                "prsn_ntby_tr_pbmn": PERSONAL_NET_AMOUNT_COL,
+                "frgn_ntby_tr_pbmn": FOREIGN_NET_AMOUNT_COL,
+                "orgn_ntby_tr_pbmn": INSTITUTION_NET_AMOUNT_COL,
+                "prsn_ntby_qty": PERSONAL_NET_QTY_COL,
+                "frgn_ntby_qty": FOREIGN_NET_QTY_COL,
+                "orgn_ntby_qty": INSTITUTION_NET_QTY_COL,
+            }
+        )
+
+        if DATE_COL in df.columns:
+            df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
+            df = df.dropna(subset=[DATE_COL]).set_index(DATE_COL).sort_index()
+
+        numeric_columns = (
+            PERSONAL_NET_AMOUNT_COL,
+            FOREIGN_NET_AMOUNT_COL,
+            INSTITUTION_NET_AMOUNT_COL,
+            PERSONAL_NET_QTY_COL,
+            FOREIGN_NET_QTY_COL,
+            INSTITUTION_NET_QTY_COL,
+        )
+        return self._coerce_numeric(df, numeric_columns)
+
+    def _merge_frames(self, price_df: pd.DataFrame, investor_df: pd.DataFrame) -> pd.DataFrame:
+        if price_df.empty:
+            raise DataNotSufficientError("Price DataFrame is empty.")
+
+        if investor_df.empty:
+            return price_df.copy()
+
+        if price_df.index.name == DATE_COL and investor_df.index.name == DATE_COL:
+            return price_df.join(investor_df, how="left").fillna(0)
+
+        return pd.concat([price_df.reset_index(drop=True), investor_df.reset_index(drop=True)], axis=1)
+
+    def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Calculate moving averages and MACD after validating required data."""
+        if df.empty or CLOSE_COL not in df.columns:
+            raise DataNotSufficientError("Indicator calculation requires non-empty data with '종가'.")
+
+        result = df.copy()
+        result[CLOSE_COL] = pd.to_numeric(result[CLOSE_COL], errors="coerce")
+        result = result.dropna(subset=[CLOSE_COL])
+
+        if result.empty:
+            raise DataNotSufficientError("'종가' contains no numeric values.")
+
+        result["MA5"] = result[CLOSE_COL].rolling(window=5).mean()
+        result["MA20"] = result[CLOSE_COL].rolling(window=20).mean()
+        result["MA60"] = result[CLOSE_COL].rolling(window=60).mean()
+
+        ema12 = result[CLOSE_COL].ewm(span=12, adjust=False).mean()
+        ema26 = result[CLOSE_COL].ewm(span=26, adjust=False).mean()
+        result["MACD"] = ema12 - ema26
+        result["Signal"] = result["MACD"].ewm(span=9, adjust=False).mean()
+        result["MACD_Oscillator"] = result["MACD"] - result["Signal"]
+
+        return result
+
+    def _coerce_numeric(self, df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
+        result = df.copy()
+        for column in columns:
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce").fillna(0)
+        return result
+
+    def _extract_records(self, payload: Any, preferred_keys: Iterable[str]) -> List[Dict[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+
+        if not isinstance(payload, dict):
+            return []
+
+        for key in preferred_keys:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+            if isinstance(value, dict):
+                return [value]
+
+        if all(not isinstance(value, (dict, list)) for value in payload.values()):
+            return [payload]
+
+        return self._find_first_record_list(payload)
+
+    def _find_first_record_list(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        for value in payload.values():
+            if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+                return value
+            if isinstance(value, dict):
+                nested = self._find_first_record_list(value)
+                if nested:
+                    return nested
+        return []

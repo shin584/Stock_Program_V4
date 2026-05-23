@@ -1,0 +1,328 @@
+import datetime
+import json
+import logging
+import os
+import time
+from typing import Any, Dict, Optional
+
+import requests
+
+# 로깅 설정: 시스템의 상태를 모니터링하기 위해 INFO 레벨로 설정합니다.
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class KisApiError(Exception):
+    """
+    [학습 포인트] 사용자 정의 예외 (Custom Exception)
+    일반적인 Exception 대신 구체적인 에러 클래스를 만들어두면, 
+    상위 모듈(DataFetcher 등)에서 '어떤 종류의 에러'인지 정확히 파악하고 대처할 수 있습니다. (Fail-Fast 원칙)
+    """
+    pass
+
+
+class KisAuthError(KisApiError):
+    """
+    KIS API 인증(토큰 발급/갱신) 실패 시 발생하는 전용 에러입니다.
+    KisApiError를 상속받아 계층 구조를 형성합니다.
+    """
+    pass
+
+
+class KisClient:
+    """
+    한국투자증권(KIS) API 통신을 전담하는 클라이언트 클래스입니다.
+    
+    [학습 포인트] 싱글톤 패턴 (Singleton Pattern)
+    애플리케이션 전역에서 단 하나의 인스턴스만 생성되도록 보장하여,
+    API 토큰이 여러 번 중복 발급되는 낭비와 동기화 문제를 방지합니다.
+    """
+
+    # 싱글톤 인스턴스를 저장할 클래스 변수
+    _instance: Optional["KisClient"] = None
+
+    def __init__(self, app_key: str, app_secret: str, acc_no: str, mock: bool = True) -> None:
+        """
+        클라이언트 초기화 (싱글톤 패턴 적용으로 중복 초기화 방지)
+        
+        Args:
+            app_key (str): KIS API Apgoekdp Key
+            app_secret (str): KIS API App Secret
+            acc_no (str): 계좌번호 (예: '12345678-01')
+            mock (bool): 모의투자 여부 (기본값: True)
+        """
+        # [Why] 싱글톤 인스턴스가 이미 초기화되었다면 중복 실행을 막기 위한 안전장치(Lock)입니다.
+        if getattr(self, "_initialized", False):
+            return
+        self._initialized = True
+
+        self.app_key = app_key
+        self.app_secret = app_secret
+        self.mock = mock
+
+        # [How] 계좌번호 파싱 로직: '12345678-01' 형태에서 앞/뒤 자리를 분리합니다.
+        if not acc_no or not isinstance(acc_no, str):
+            logger.error("[KIS] Invalid account number provided.")
+            self.acc_no_prefix = ""
+            self.acc_no_suffix = ""
+        elif "-" in acc_no:
+            self.acc_no_prefix, self.acc_no_suffix = acc_no.split("-", 1)
+        else:
+            self.acc_no_prefix = acc_no
+            self.acc_no_suffix = "01"
+
+        # 모의/실전 투자에 따른 Base URL 분기 처리
+        if mock:
+            self.base_url = "https://openapivts.koreainvestment.com:29443"
+            logger.info("[KIS] Initialized in mock mode.")
+        else:
+            self.base_url = "https://openapi.koreainvestment.com:9443"
+            logger.info("[KIS] Initialized in live mode.")
+
+        # 토큰 관리를 위한 인스턴스 변수 초기화
+        self.access_token: Optional[str] = None
+        self.token_expiry: Optional[datetime.datetime] = None
+        
+        # [Why] 토큰을 파일로 캐싱하여, 프로그램이 재시작되어도 API 중복 호출을 최소화합니다.
+        self.token_file = os.path.join(os.path.dirname(__file__), "kis_token.json")
+
+        # 인스턴스 생성 시 로컬에 저장된 토큰이 있는지 확인하고 로드합니다.
+        self._load_token()
+
+    @classmethod
+    def get_instance(
+        cls, app_key: str, app_secret: str, acc_no: str, mock: bool = True
+    ) -> "KisClient":
+        """
+        싱글톤 인스턴스를 반환하는 팩토리 메서드입니다.
+        
+        Returns:
+            KisClient: 전역적으로 유일한 KIS 클라이언트 인스턴스
+            
+        [학습 포인트] 객체 지향의 의존성 제어
+        외부에서는 KisClient()를 직접 생성하지 않고, 항상 이 메서드를 통해 인스턴스를 얻도록 강제합니다.
+        """
+        if cls._instance is None:
+            cls._instance = cls(app_key, app_secret, acc_no, mock)
+        return cls._instance
+
+    def _load_token(self) -> None:
+        """로컬에 캐싱된 토큰 파일(kis_token.json)을 읽어와 유효성을 검증합니다."""
+        if not os.path.exists(self.token_file):
+            return
+        try:
+            with open(self.token_file, "r") as handle:
+                data = json.load(handle)
+            # 만료 시간을 파싱하여 현재 시간과 비교 (유효한지 체크)
+            expiry = datetime.datetime.strptime(data["expiry"], "%Y-%m-%d %H:%M:%S")
+            if expiry > datetime.datetime.now():
+                self.access_token = data["access_token"]
+                self.token_expiry = expiry
+                logger.info("[KIS] Loaded cached access token.")
+        except Exception as exc:
+            logger.warning("[KIS] Failed to load token: %s", exc)
+
+    def _save_token(self, token: str, expiry: datetime.datetime) -> None:
+        """발급받은 토큰을 로컬 파일에 저장(캐싱)합니다."""
+        try:
+            with open(self.token_file, "w") as handle:
+                json.dump(
+                    {"access_token": token, "expiry": expiry.strftime("%Y-%m-%d %H:%M:%S")},
+                    handle,
+                )
+        except Exception as exc:
+            logger.warning("[KIS] Failed to save token: %s", exc)
+
+    def _token_is_valid(self) -> bool:
+        """현재 메모리에 있는 토큰이 존재하고 만료되지 않았는지 검사합니다."""
+        return bool(self.access_token and self.token_expiry and self.token_expiry > datetime.datetime.now())
+
+    def _get_headers(self, tr_id: Optional[str] = None) -> Dict[str, str]:
+        """
+        API 요청에 필요한 공통 헤더를 생성합니다.
+        
+        Args:
+            tr_id (Optional[str]): KIS API에서 요구하는 트랜잭션 ID (요청 종류별로 다름)
+        """
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {self.access_token}",
+            "appkey": self.app_key,
+            "appsecret": self.app_secret,
+        }
+        if tr_id:
+            headers["tr_id"] = tr_id
+        return headers
+
+    def refresh_token(self) -> None:
+        """
+        새로운 OAuth2 접근 토큰을 발급받아 인스턴스 변수와 파일에 갱신합니다.
+        
+        Raises:
+            KisAuthError: 토큰 발급 요청 자체가 실패하거나, 올바르지 않은 응답을 받았을 때 발생합니다.
+        """
+        path = "/oauth2/tokenP"
+        url = f"{self.base_url}{path}"
+        body = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
+
+        try:
+            response = requests.post(url, data=json.dumps(body), headers={"content-type": "application/json"})
+        except Exception as exc:
+            logger.error("[KIS] Auth request error: %s", exc)
+            # [Why] 내부 시스템 에러(requests.exceptions)를 도메인 에러(KisAuthError)로 감싸서 던집니다.
+            raise KisAuthError("KIS auth request failed.") from exc
+
+        if response.status_code != 200:
+            logger.error("[KIS] Auth failed: %s", response.text)
+            raise KisAuthError("KIS auth failed with non-200 response.")
+
+        # 정상 발급 시 데이터 갱신 및 파일 캐싱
+        payload = response.json()
+        self.access_token = payload.get("access_token")
+        expires_in = int(payload.get("expires_in", 0))
+        self.token_expiry = datetime.datetime.now() + datetime.timedelta(seconds=expires_in)
+        self._save_token(self.access_token, self.token_expiry)
+        
+        logger.info("[KIS] Access token refreshed.")
+        return None
+
+    def _is_rate_limited(self, payload: Dict[str, Any]) -> bool:
+        """응답 메시지를 분석하여 초당 호출 제한(Rate Limit)에 걸렸는지 판별합니다."""
+        msg = payload.get("msg1", "")
+        if not isinstance(msg, str):
+            return False
+        lowered = msg.lower()
+        return "초당 전송건수" in msg or "rate" in lowered or "limit" in lowered or "초과" in msg
+
+    def _is_auth_error_payload(self, payload: Dict[str, Any]) -> bool:
+        """응답 메시지를 분석하여 토큰 만료 등 인증 에러인지 판별합니다."""
+        msg = payload.get("msg1", "")
+        if not isinstance(msg, str):
+            return False
+        lowered = msg.lower()
+        return "token" in lowered or "인증" in msg or "authorization" in lowered
+
+    def _send_request(
+        self,
+        method: str,
+        path: str,
+        tr_id: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
+        max_retries: int = 5,
+    ) -> Dict[str, Any]:
+        """
+        API 통신을 실제로 수행하며, 재시도(Retry) 로직과 예외 처리를 전담하는 핵심 캡슐화 메서드입니다.
+        
+        [학습 포인트] 지수 백오프 (Exponential Backoff)
+        API 호출 한도에 걸렸을 때 즉시 재시도하지 않고, 재시도 횟수(attempt)가 늘어날수록 
+        대기 시간(wait_time)을 2의 제곱수로 점진적으로 늘려 서버의 부하를 줄이는 고급 분산 기법입니다.
+        
+        Args:
+            method: HTTP 메서드 (GET/POST)
+            path: API 엔드포인트 경로
+            tr_id: 트랜잭션 ID
+            max_retries: 최대 재시도 횟수 (기본 5회)
+            
+        Raises:
+            KisApiError: 최대 재시도 횟수를 초과하거나 치명적인 에러 발생 시
+        """
+        url = f"{self.base_url}{path}"
+
+        for attempt in range(max_retries):
+            headers = self._get_headers(tr_id)
+            try:
+                if method == "GET":
+                    response = requests.get(url, headers=headers, params=params)
+                else:
+                    response = requests.post(url, headers=headers, data=json.dumps(data) if data else None)
+            except Exception as exc:
+                # 네트워크 일시 단절 등의 예외 발생 시 1초 대기 후 재시도
+                logger.error("[KIS] Request error: %s", exc)
+                time.sleep(1.0)
+                continue
+
+            # HTTP 401 (Unauthorized) 발생 시 토큰 갱신 후 즉시 재시도
+            if response.status_code == 401:
+                self.refresh_token()
+                continue
+
+            # 서버측 에러(500번대) 발생 시 1초 대기 후 재시도
+            if response.status_code >= 500:
+                logger.warning("[KIS] Server error %s. Retrying...", response.status_code)
+                time.sleep(1.0)
+                continue
+
+            # 200(OK)이나 401, 500이 아닌 다른 에러 코드는 즉시 예외 처리 (복구 불가능)
+            if response.status_code != 200:
+                logger.error("[KIS] Request failed: %s %s", response.status_code, response.text)
+                raise KisApiError(f"KIS request failed with status {response.status_code}.")
+
+            payload = response.json()
+            
+            # KIS API 특성 상 상태코드가 200이어도 내부 페이로드(msg1)에 에러 메시지가 담겨올 수 있음
+            if self._is_rate_limited(payload):
+                # 지수 백오프 로직 적용: 0.5초, 1초, 2초, 4초... 순으로 증가
+                wait_time = 0.5 * (2 ** attempt)
+                logger.warning("[KIS] Rate limit hit. Waiting %.1fs (%s/%s)", wait_time, attempt + 1, max_retries)
+                time.sleep(wait_time)
+                continue
+
+            if self._is_auth_error_payload(payload):
+                # 메시지 기반 인증 에러 감지 시 토큰 갱신 후 재시도
+                self.refresh_token()
+                continue
+
+            # 에러가 없는 순수 정상 응답인 경우 데이터 반환
+            return payload
+
+        # 지정된 재시도 횟수를 모두 소모한 경우 예외 발생 (Fail-Fast)
+        raise KisApiError("KIS request retries exhausted.")
+
+    def fetch_market_data(self, ticker: str) -> Dict[str, Any]:
+        """
+        단일 종목의 1) 현재가 시세와 2) 투자자 매매동향을 한 번에 가져오는 Facade 메서드입니다.
+        
+        Args:
+            ticker (str): 종목 코드 (예: '005930')
+            
+        Returns:
+            Dict[str, Any]: {"price": 시세데이터_Dict, "investor": 매매동향데이터_Dict}
+        """
+        # API 호출 전 토큰 유효성을 선제적으로 검사
+        if not self._token_is_valid():
+            self.refresh_token()
+
+        # 1. 주식 기간별 일봉 차트 조회 (FHKST03010100)
+        end_date = datetime.datetime.now()
+        start_date = end_date - datetime.timedelta(days=100)
+
+        try:
+            price_payload = self._send_request(
+                "GET",
+                "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+                tr_id="FHKST03010100",
+                params={
+                    "FID_COND_MRKT_DIV_CODE": "J",
+                    "FID_INPUT_ISCD": ticker,
+                    "FID_INPUT_DATE_1": start_date.strftime("%Y%m%d"),
+                    "FID_INPUT_DATE_2": end_date.strftime("%Y%m%d"),
+                    "FID_PERIOD_DIV_CODE": "D",
+                    "FID_ORG_ADJ_PRC": "0",
+                },
+            )
+        except KisApiError:
+            raise
+        except Exception as exc:
+            logger.error("[KIS] Daily item chart request error: %s", exc)
+            raise KisApiError("KIS daily item chart request failed.") from exc
+
+        # 2. 주식 투자자별 매매동향 조회 (FHKST01010900)
+        investor_payload = self._send_request(
+            "GET",
+            "/uapi/domestic-stock/v1/quotations/inquire-investor",
+            tr_id="FHKST01010900",
+            params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
+        )
+
+        return {"price": price_payload, "investor": investor_payload}

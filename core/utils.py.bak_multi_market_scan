@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Optional
+
+import pandas as pd
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_TICKERS_FILE = PROJECT_ROOT / "tickers.json"
+
+
+class TickerLoadError(Exception):
+    """Raised when ticker metadata cannot be loaded."""
+
+
+def load_tickers(
+    market_type: Optional[str] = None,
+    top_n: Optional[int] = None,
+    file_path: Optional[Path] = None,
+) -> pd.DataFrame:
+    """Load ticker metadata from tickers.json outside the controller layer."""
+    tickers_path = Path(file_path) if file_path is not None else DEFAULT_TICKERS_FILE
+    if not tickers_path.exists():
+        raise TickerLoadError(f"Ticker file not found: {tickers_path}")
+
+    try:
+        with tickers_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise TickerLoadError(f"Ticker file contains invalid JSON: {tickers_path}") from exc
+    except OSError as exc:
+        raise TickerLoadError(f"Unable to read ticker file: {tickers_path}") from exc
+
+    if not isinstance(data, list):
+        raise TickerLoadError("Ticker file must contain a JSON array.")
+
+    tickers = pd.DataFrame(data)
+    if tickers.empty:
+        return tickers
+
+    if market_type is not None and "market" in tickers.columns:
+        tickers = tickers[tickers["market"] == market_type]
+
+    if top_n is not None:
+        tickers = tickers.head(top_n)
+
+    return tickers.reset_index(drop=True)

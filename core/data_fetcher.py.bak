@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+from typing import Any, Dict, Iterable, List, Optional
+
+import pandas as pd
+
+from .config import get_kis_config
+from ..api.kis_client import KisClient
+
+
+class DataNotSufficientError(Exception):
+    """Raised when market data is missing fields required for analysis."""
+
+
+class DataFetcher:
+    """Fetch KIS market JSON and normalize it into an analysis-ready DataFrame."""
+
+    def __init__(self) -> None:
+        config = get_kis_config()
+        self.kis_client = KisClient.get_instance(**config)
+
+    def get_and_process_data(self, ticker: str) -> pd.DataFrame:
+        """Return a normalized DataFrame with price, investor, MA, and MACD columns."""
+        if not ticker or not str(ticker).strip():
+            raise DataNotSufficientError("Ticker must not be empty.")
+
+        raw_data = self.kis_client.fetch_market_data(str(ticker).strip())
+        if not isinstance(raw_data, dict):
+            raise DataNotSufficientError("KIS response must be a JSON object.")
+
+        price_df = self._build_price_frame(raw_data.get("price"))
+        investor_df = self._build_investor_frame(raw_data.get("investor"))
+        df = self._merge_frames(price_df, investor_df)
+        return self._calculate_indicators(df)
+
+    def _build_price_frame(self, payload: Any) -> pd.DataFrame:
+        records = self._extract_records(payload, preferred_keys=("output2", "output"))
+        if not records:
+            raise DataNotSufficientError("Price data is empty.")
+
+        df = pd.DataFrame(records).rename(
+            columns={
+                "stck_bsop_date": "일자",
+                "stck_clpr": "종가",
+                "stck_oprc": "시가",
+                "stck_hgpr": "고가",
+                "stck_lwpr": "저가",
+                "acml_vol": "거래량",
+                "acml_tr_pbmn": "거래대금",
+                "prdy_ctrt": "등락률",
+            }
+        )
+
+        if "일자" in df.columns:
+            df["일자"] = pd.to_datetime(df["일자"], errors="coerce")
+            df = df.dropna(subset=["일자"]).set_index("일자").sort_index()
+
+        numeric_columns = ("종가", "시가", "고가", "저가", "거래량", "거래대금", "등락률")
+        df = self._coerce_numeric(df, numeric_columns)
+
+        if "등락률" not in df.columns and "종가" in df.columns:
+            df["등락률"] = df["종가"].pct_change().mul(100).fillna(0)
+
+        return df
+
+    def _build_investor_frame(self, payload: Any) -> pd.DataFrame:
+        records = self._extract_records(payload, preferred_keys=("output", "output2"))
+        if not records:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(records).rename(
+            columns={
+                "stck_bsop_date": "일자",
+                "prsn_ntby_tr_pbmn": "개인_순매수금액",
+                "frgn_ntby_tr_pbmn": "외국인_순매수금액",
+                "orgn_ntby_tr_pbmn": "기관_순매수금액",
+                "prsn_ntby_qty": "개인_순매수수량",
+                "frgn_ntby_qty": "외국인_순매수수량",
+                "orgn_ntby_qty": "기관_순매수수량",
+            }
+        )
+
+        if "일자" in df.columns:
+            df["일자"] = pd.to_datetime(df["일자"], errors="coerce")
+            df = df.dropna(subset=["일자"]).set_index("일자").sort_index()
+
+        numeric_columns = (
+            "개인_순매수금액",
+            "외국인_순매수금액",
+            "기관_순매수금액",
+            "개인_순매수수량",
+            "외국인_순매수수량",
+            "기관_순매수수량",
+        )
+        return self._coerce_numeric(df, numeric_columns)
+
+    def _merge_frames(self, price_df: pd.DataFrame, investor_df: pd.DataFrame) -> pd.DataFrame:
+        if price_df.empty:
+            raise DataNotSufficientError("Price DataFrame is empty.")
+
+        if investor_df.empty:
+            return price_df.copy()
+
+        if price_df.index.name == "일자" and investor_df.index.name == "일자":
+            return price_df.join(investor_df, how="left").fillna(0)
+
+        return pd.concat([price_df.reset_index(drop=True), investor_df.reset_index(drop=True)], axis=1)
+
+    def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Calculate moving averages and MACD after validating required data."""
+        if df.empty or "종가" not in df.columns:
+            raise DataNotSufficientError("Indicator calculation requires non-empty data with '종가'.")
+
+        result = df.copy()
+        result["종가"] = pd.to_numeric(result["종가"], errors="coerce")
+        result = result.dropna(subset=["종가"])
+
+        if result.empty:
+            raise DataNotSufficientError("'종가' contains no numeric values.")
+
+        result["MA5"] = result["종가"].rolling(window=5).mean()
+        result["MA20"] = result["종가"].rolling(window=20).mean()
+        result["MA60"] = result["종가"].rolling(window=60).mean()
+
+        ema12 = result["종가"].ewm(span=12, adjust=False).mean()
+        ema26 = result["종가"].ewm(span=26, adjust=False).mean()
+        result["MACD"] = ema12 - ema26
+        result["Signal"] = result["MACD"].ewm(span=9, adjust=False).mean()
+        result["MACD_Oscillator"] = result["MACD"] - result["Signal"]
+
+        return result
+
+    def _coerce_numeric(self, df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
+        result = df.copy()
+        for column in columns:
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce").fillna(0)
+        return result
+
+    def _extract_records(self, payload: Any, preferred_keys: Iterable[str]) -> List[Dict[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+
+        if not isinstance(payload, dict):
+            return []
+
+        for key in preferred_keys:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+            if isinstance(value, dict):
+                return [value]
+
+        if all(not isinstance(value, (dict, list)) for value in payload.values()):
+            return [payload]
+
+        return self._find_first_record_list(payload)
+
+    def _find_first_record_list(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        for value in payload.values():
+            if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+                return value
+            if isinstance(value, dict):
+                nested = self._find_first_record_list(value)
+                if nested:
+                    return nested
+        return []
