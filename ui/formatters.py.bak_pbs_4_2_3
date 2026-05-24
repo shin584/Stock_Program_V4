@@ -19,14 +19,8 @@ def format_percent(value: Any) -> str:
 
 
 def format_p1(results: pd.DataFrame) -> pd.DataFrame:
-    p1_display_source = results
-    if "contribution_score" in results.columns:
-        p1_display_source = results.sort_values(
-            by="contribution_score", ascending=False
-        ).head(5)
-
     display = _select_columns(
-        p1_display_source,
+        results,
         {
             "code": "종목코드",
             "name": "종목명",

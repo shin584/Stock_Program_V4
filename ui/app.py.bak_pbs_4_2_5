@@ -149,7 +149,6 @@ def main() -> None:
             tickers=tickers,
             max_workers=int(max_workers),
             progress_callback=update_progress,
-            target_date=selected_date,
         )
 
     progress_bar.progress(1.0)

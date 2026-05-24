@@ -1,5 +1,4 @@
 import json
-import datetime
 
 import pandas as pd
 
@@ -23,11 +22,9 @@ class FakeDataFetcher:
         self.frames = frames
         self.failing_codes = set(failing_codes or [])
         self.requested_codes = []
-        self.requested_target_dates = []
 
-    def get_and_process_data(self, ticker, target_date=None):
+    def get_and_process_data(self, ticker):
         self.requested_codes.append(ticker)
-        self.requested_target_dates.append(target_date)
         if ticker in self.failing_codes:
             raise DataNotSufficientError("sample data is insufficient")
         return self.frames[ticker].copy()
@@ -45,15 +42,6 @@ def _leader_frame(change_rate=3.0):
             INSTITUTION_NET_AMOUNT_COL: [0] * 17 + [40 * 100_000_000] * 3,
         }
     )
-
-
-def _condition_not_met_frame():
-    frame = _leader_frame(change_rate=-1.0)
-    frame[TRADE_VALUE_COL] = 10 * 100_000_000
-    frame[VOLUME_COL] = [1_000] * len(frame)
-    frame[FOREIGN_NET_AMOUNT_COL] = [0] * len(frame)
-    frame[INSTITUTION_NET_AMOUNT_COL] = [0] * len(frame)
-    return frame
 
 
 def test_run_scan_uses_injected_fetcher_and_isolates_failures():
@@ -81,57 +69,6 @@ def test_run_scan_uses_injected_fetcher_and_isolates_failures():
     assert scan["failures"][0]["code"] == "000002"
     assert scan["failures"][0]["error_type"] == "DataNotSufficientError"
     assert "sectors" not in scan
-
-
-def test_run_scan_tracks_condition_not_met_stocks_as_failures():
-    tickers = [
-        {"code": "000001", "name": "Alpha", "market": "KOSPI", "cap": 1_000_000_000},
-        {"code": "000002", "name": "Quiet", "market": "KOSPI", "cap": 1_000_000_000},
-    ]
-    fetcher = FakeDataFetcher(
-        frames={
-            "000001": _leader_frame(),
-            "000002": _condition_not_met_frame(),
-        },
-    )
-    scanner = MarketScanner(
-        data_fetcher=fetcher,
-        strategies=[P1Strategy(), P2Strategy(), P3Strategy()],
-    )
-
-    scan = scanner.run_scan(tickers, max_workers=2)
-
-    assert len(scan["results"]) + len(scan["failures"]) == len(tickers)
-    assert len(scan["results"]) == 1
-    assert len(scan["failures"]) == 1
-    assert scan["failures"][0] == {
-        "code": "000002",
-        "name": "Quiet",
-        "error_type": "ConditionNotMet",
-        "message": "전략 조건 미달 (P1/P2/P3 모두 불합격)",
-    }
-
-
-def test_run_scan_passes_target_date_to_data_fetcher():
-    target_date = datetime.date(2026, 5, 10)
-    tickers = [
-        {"code": "000001", "name": "Alpha", "market": "KOSPI", "cap": 1_000_000_000},
-        {"code": "000002", "name": "Beta", "market": "KOSPI", "cap": 1_000_000_000},
-    ]
-    fetcher = FakeDataFetcher(
-        frames={
-            "000001": _leader_frame(),
-            "000002": _leader_frame(),
-        },
-    )
-    scanner = MarketScanner(
-        data_fetcher=fetcher,
-        strategies=[P1Strategy(), P2Strategy(), P3Strategy()],
-    )
-
-    scanner.run_scan(tickers, max_workers=2, target_date=target_date)
-
-    assert fetcher.requested_target_dates == [target_date, target_date]
 
 
 def test_load_tickers_loads_kospi_and_kosdaq_without_market_input(tmp_path, monkeypatch):

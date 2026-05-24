@@ -70,13 +70,13 @@ class P2Strategy(SectorAnalysisStrategy):
         if change_rate < 2.0 and trade_value < 500 * ONE_EOK:
             return {"strategy": "P2", "is_p2": False, "failed_rule": "liquidity"}
 
-        ma5_disparity = _calculate_ma5_disparity(df)
-        if ma5_disparity["is_overheated"]:
+        disparity = _calculate_ma5_disparity(df)
+        if disparity["is_overheated"]:
             return {
                 "strategy": "P2",
                 "is_p2": False,
                 "failed_rule": "disparity",
-                "disparity": ma5_disparity["value"],
+                "disparity": disparity["value"],
             }
 
         foreign_buy_days = _count_consecutive_positive(df[FOREIGN_NET_AMOUNT_COL])
@@ -109,8 +109,7 @@ class P2Strategy(SectorAnalysisStrategy):
         if not magnitude_passed:
             return {"strategy": "P2", "is_p2": False, "failed_rule": "magnitude"}
         
-        ma20_disparity = _calculate_ma20_disparity(df)
-        stage_text = "초기포착" if ma20_disparity["value"] <= 5.0 else "추세확정"
+        stage_text = "초기포착" if disparity["value"] <= 10.0 else "추세확정" # V3의 105 기준을 disparity 수치로 변환
         
         if foreign_buy_days > 0 and institution_buy_days > 0:
             reason_text = "쌍끌이"
@@ -129,8 +128,6 @@ class P2Strategy(SectorAnalysisStrategy):
             "institution_buy_days": institution_buy_days,
             "accumulated_foreign_5d": accumulated_foreign,
             "accumulated_institution_5d": accumulated_institution,
-            "ma5_disparity": ma5_disparity["value"],
-            "ma20_disparity": ma20_disparity["value"],
         }
 
 
@@ -207,19 +204,3 @@ def _calculate_ma5_disparity(df: pd.DataFrame) -> Dict[str, Any]:
 
     disparity = (close_price - ma5) / ma5 * 100
     return {"is_overheated": disparity > 5.0, "value": disparity}
-
-
-def _calculate_ma20_disparity(df: pd.DataFrame) -> Dict[str, Any]:
-    if "MA20" in df.columns:
-        ma20 = _to_float(df.iloc[-1].get("MA20"))
-    elif len(df) >= 20:
-        close = pd.to_numeric(df[CLOSE_COL], errors="coerce")
-        ma20 = float(close.rolling(window=20).mean().iloc[-1])
-    else:
-        return {"value": 0.0}
-
-    close_price = _to_float(df.iloc[-1].get(CLOSE_COL))
-    if ma20 <= 0:
-        return {"value": 0.0}
-
-    return {"value": (close_price - ma20) / ma20 * 100}

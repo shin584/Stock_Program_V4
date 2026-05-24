@@ -30,22 +30,17 @@ class StreamlitUI:
     def select_date(self) -> date:
         return st.sidebar.date_input("분석 기준일", value=date.today())
 
+    def click_scan(self) -> bool:
+        return st.sidebar.button("스캔 시작", type="primary", use_container_width=True)
+
     def render_results(
         self,
         results: pd.DataFrame,
         failures: List[Dict[str, Any]],
     ) -> None:
-        condition_not_met = [
-            failure for failure in failures if failure.get("error_type") == "ConditionNotMet"
-        ]
-        error_failures = [
-            failure for failure in failures if failure.get("error_type") != "ConditionNotMet"
-        ]
-
-        summary_cols = st.columns(3)
+        summary_cols = st.columns(2)
         summary_cols[0].metric("선별 종목", len(results))
-        summary_cols[1].metric("조건 미달(Skipped)", len(condition_not_met))
-        summary_cols[2].metric("API/에러 실패", len(error_failures))
+        summary_cols[1].metric("분석 실패", len(failures))
 
         p1_results = results[results["is_p1"] == True] if "is_p1" in results else pd.DataFrame()
         p2_results = results[results["is_p2"] == True] if "is_p2" in results else pd.DataFrame()
@@ -63,24 +58,11 @@ class StreamlitUI:
             else:
                 st.dataframe(table, use_container_width=True, hide_index=True)
 
-        if condition_not_met:
-            st.subheader("조건 미달 종목")
-            with st.expander("조건 미달 상세 보기", expanded=False):
-                st.dataframe(
-                    format_failures(condition_not_met),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-        if error_failures:
-            st.subheader("API/에러 실패 종목")
+        if failures:
+            st.subheader("분석 실패 종목")
             st.warning("일부 종목은 데이터 부족, API 응답 오류, 휴장일 데이터 부재 등으로 제외되었습니다.")
             with st.expander("실패 상세 보기", expanded=True):
-                st.dataframe(
-                    format_failures(error_failures),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                st.dataframe(format_failures(failures), use_container_width=True, hide_index=True)
 
 
 @st.cache_resource
@@ -103,21 +85,6 @@ def main() -> None:
     st.set_page_config(page_title="Stock Program V4", layout="wide")
     st.title("Stock Program V4")
 
-    selected_date = st.sidebar.date_input("분석 기준일", value=date.today())
-    top_n = st.sidebar.number_input("스캔 종목 수", min_value=1, max_value=300, value=100, step=10)
-    max_workers = st.sidebar.slider("동시 처리 수", min_value=1, max_value=20, value=10)
-
-    st.caption(f"선택 기준일: {selected_date.isoformat()}")
-
-    scan_clicked = st.button(
-        "전체 시장 스캔 시작",
-        type="primary",
-        use_container_width=True,
-    )
-    if not scan_clicked:
-        st.info("사이드바에서 환경 설정을 확인한 뒤 전체 시장 스캔을 시작하세요.")
-        return
-
     try:
         scanner = build_scanner()
     except ConfigError as exc:
@@ -125,6 +92,15 @@ def main() -> None:
         st.stop()
 
     ui = StreamlitUI(scanner)
+    selected_date = ui.select_date()
+    top_n = st.sidebar.number_input("스캔 종목 수", min_value=1, max_value=300, value=100, step=10)
+    max_workers = st.sidebar.slider("동시 처리 수", min_value=1, max_value=20, value=10)
+
+    st.caption(f"선택 기준일: {selected_date.isoformat()}")
+
+    if not ui.click_scan():
+        st.info("사이드바에서 조건을 선택한 뒤 스캔을 시작하세요.")
+        return
 
     try:
         tickers = load_tickers(top_n=int(top_n))
@@ -149,7 +125,6 @@ def main() -> None:
             tickers=tickers,
             max_workers=int(max_workers),
             progress_callback=update_progress,
-            target_date=selected_date,
         )
 
     progress_bar.progress(1.0)

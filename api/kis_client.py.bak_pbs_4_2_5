@@ -279,17 +279,12 @@ class KisClient:
         # 지정된 재시도 횟수를 모두 소모한 경우 예외 발생 (Fail-Fast)
         raise KisApiError("KIS request retries exhausted.")
 
-    def fetch_market_data(
-        self,
-        ticker: str,
-        target_date: Optional[datetime.date] = None,
-    ) -> Dict[str, Any]:
+    def fetch_market_data(self, ticker: str) -> Dict[str, Any]:
         """
         단일 종목의 1) 현재가 시세와 2) 투자자 매매동향을 한 번에 가져오는 Facade 메서드입니다.
         
         Args:
             ticker (str): 종목 코드 (예: '005930')
-            target_date (Optional[datetime.date]): 조회 종료 기준일
             
         Returns:
             Dict[str, Any]: {"price": 시세데이터_Dict, "investor": 매매동향데이터_Dict}
@@ -299,11 +294,7 @@ class KisClient:
             self.refresh_token()
 
         # 1. 주식 기간별 일봉 차트 조회 (FHKST03010100)
-        end_date = (
-            datetime.datetime.combine(target_date, datetime.time.min)
-            if target_date is not None
-            else datetime.datetime.now()
-        )
+        end_date = datetime.datetime.now()
         start_date = end_date - datetime.timedelta(days=100)
 
         try:

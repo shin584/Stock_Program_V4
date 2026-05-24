@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import pandas as pd
@@ -42,7 +41,6 @@ class MarketScanner:
         tickers: Iterable[Dict[str, Any]] | pd.DataFrame,
         max_workers: int = 10,
         progress_callback: Optional[ProgressCallback] = None,
-        target_date: Optional[date] = None,
     ) -> Dict[str, Any]:
         """Scan injected ticker metadata and isolate per-stock failures."""
         ticker_rows = self._normalize_tickers(tickers)
@@ -55,7 +53,7 @@ class MarketScanner:
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             future_to_row = {
-                executor.submit(self._process_stock, row, target_date): row for row in ticker_rows
+                executor.submit(self._process_stock, row): row for row in ticker_rows
             }
             total = len(future_to_row)
             for completed, future in enumerate(as_completed(future_to_row), start=1):
@@ -80,11 +78,7 @@ class MarketScanner:
             "failures": failures,
         }
 
-    def _process_stock(
-        self,
-        ticker_row: Dict[str, Any],
-        target_date: Optional[date] = None,
-    ) -> Dict[str, Any]:
+    def _process_stock(self, ticker_row: Dict[str, Any]) -> Dict[str, Any]:
         ticker = str(ticker_row.get("code", "")).strip()
         name = ticker_row.get("name", "")
 
@@ -92,7 +86,7 @@ class MarketScanner:
             if not ticker:
                 raise DataNotSufficientError("Ticker code is missing.")
 
-            df = self.data_fetcher.get_and_process_data(ticker, target_date=target_date)
+            df = self.data_fetcher.get_and_process_data(ticker)
             if "market_cap" not in df.columns:
                 df = df.copy()
                 df["market_cap"] = ticker_row.get("market_cap", ticker_row.get("cap", 0))
@@ -100,15 +94,7 @@ class MarketScanner:
             strategy_results = [strategy.analyze(df) for strategy in self.strategies]
             result = self._build_result(ticker_row, df, strategy_results)
             if not (result.get("is_p1") or result.get("is_p2") or result.get("is_p3")):
-                return {
-                    "ok": False,
-                    "failure": self._build_failure(
-                        ticker,
-                        name,
-                        "ConditionNotMet",
-                        "전략 조건 미달 (P1/P2/P3 모두 불합격)",
-                    ),
-                }
+                return {"ok": True, "result": None}
 
             return {"ok": True, "result": result}
 

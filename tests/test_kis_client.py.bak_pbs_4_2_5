@@ -57,23 +57,6 @@ def test_fetch_market_data_uses_daily_chart_window_and_keeps_investor_request(mo
     }
 
 
-def test_fetch_market_data_uses_explicit_target_date_for_chart_window(monkeypatch):
-    monkeypatch.setattr(kis_client_module.datetime, "datetime", FixedDateTime)
-    client = _client_without_auth()
-    calls = []
-
-    def fake_send_request(method, path, tr_id=None, params=None):
-        calls.append({"method": method, "path": path, "tr_id": tr_id, "params": params})
-        return {"path": path}
-
-    client._send_request = fake_send_request
-
-    client.fetch_market_data("005930", target_date=datetime.date(2026, 5, 10))
-
-    assert calls[0]["params"]["FID_INPUT_DATE_1"] == "20260130"
-    assert calls[0]["params"]["FID_INPUT_DATE_2"] == "20260510"
-
-
 def test_fetch_market_data_wraps_unexpected_chart_error_as_kis_api_error():
     client = _client_without_auth()
 

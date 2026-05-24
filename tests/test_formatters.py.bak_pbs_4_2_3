@@ -37,30 +37,6 @@ def test_format_p1_uses_index_leader_columns():
     assert display.iloc[0]["외국인순매수"] == "30.0억"
 
 
-def test_format_p1_displays_only_top_five_by_contribution_score_without_mutating_source():
-    source = pd.DataFrame(
-        [
-            {
-                "code": f"{index:06d}",
-                "name": f"Stock {index}",
-                "current_price": 10_000,
-                "change_rate": 1.0,
-                "contribution_score": score,
-                "foreign_net_amount": 0,
-                "institution_net_amount": 0,
-            }
-            for index, score in enumerate([10, 60, 30, 50, 20, 40], start=1)
-        ]
-    )
-    original_codes = source["code"].tolist()
-
-    display = format_p1(source)
-
-    assert source["code"].tolist() == original_codes
-    assert len(display) == 5
-    assert display["종목코드"].tolist() == ["000002", "000004", "000006", "000003", "000005"]
-
-
 def test_format_p2_uses_strategy_text_fields():
     display = format_p2(_result_frame())
 

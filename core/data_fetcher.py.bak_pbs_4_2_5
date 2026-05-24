@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import date
 from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
@@ -58,20 +57,13 @@ class DataFetcher:
         config = get_kis_config()
         self.kis_client = KisClient.get_instance(**config)
 
-    def get_and_process_data(
-        self,
-        ticker: str,
-        target_date: Optional[date] = None,
-    ) -> pd.DataFrame:
+    def get_and_process_data(self, ticker: str) -> pd.DataFrame:
         """Return a normalized DataFrame with price, investor, MA, and MACD columns."""
         normalized_ticker = str(ticker).strip() if ticker is not None else ""
         if not normalized_ticker:
             raise DataNotSufficientError("Ticker must not be empty.")
 
-        raw_data = self.kis_client.fetch_market_data(
-            normalized_ticker,
-            target_date=target_date,
-        )
+        raw_data = self.kis_client.fetch_market_data(normalized_ticker)
         if not isinstance(raw_data, dict):
             raise DataNotSufficientError("KIS response must be a JSON object.")
 

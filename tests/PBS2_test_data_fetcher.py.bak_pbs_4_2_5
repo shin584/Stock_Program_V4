@@ -15,8 +15,6 @@ python -m pytest Stock_Program_V4\tests\test_data_fetcher.py -q
 '''
 
 
-import datetime
-
 import pytest
 
 from Stock_Program_V4.core import data_fetcher as data_fetcher_module
@@ -36,11 +34,9 @@ class FakeKisClient:
     def __init__(self, payload):
         self.payload = payload
         self.requested_tickers = []
-        self.requested_target_dates = []
 
-    def fetch_market_data(self, ticker, target_date=None):
+    def fetch_market_data(self, ticker):
         self.requested_tickers.append(ticker)
-        self.requested_target_dates.append(target_date)
         return self.payload
 
 
@@ -139,16 +135,6 @@ def test_get_and_process_data_returns_dataframe_only():
     assert result.iloc[-1][INSTITUTION_NET_AMOUNT_COL] == 200_000_000
     assert "prdy_vrss_sign" not in result.columns
     assert "prdy_vrss" not in result.columns
-
-
-def test_get_and_process_data_passes_target_date_to_kis_client():
-    fake_client = FakeKisClient(_sample_payload())
-    fetcher = DataFetcher(kis_client=fake_client)
-    target_date = datetime.date(2026, 5, 10)
-
-    fetcher.get_and_process_data("005930", target_date=target_date)
-
-    assert fake_client.requested_target_dates == [target_date]
 
 
 def test_build_price_frame_sorts_daily_chart_rows_by_trading_date():

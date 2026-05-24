@@ -57,33 +57,6 @@ def test_p2_returns_true_when_supply_demand_rule_passes():
     assert result["institution_buy_days"] == 3
 
 
-def test_p2_stage_uses_ma20_disparity_separately_from_ma5_filter():
-    df = _base_frame()
-    df[CLOSE_COL] = [100] * 15 + [107] * 5
-    df.loc[df.index[-1], CHANGE_RATE_COL] = 3.0
-    df[INSTITUTION_NET_AMOUNT_COL] = [0] * 17 + [40 * 100_000_000] * 3
-
-    result = P2Strategy().analyze(df)
-
-    assert result["is_p2"] is True
-    assert result["ma5_disparity"] <= 5.0
-    assert result["ma20_disparity"] > 5.0
-    assert result["p2_stage"] == "추세확정"
-
-
-def test_p2_stage_returns_early_capture_when_ma20_disparity_is_not_extended():
-    df = _base_frame()
-    df[CLOSE_COL] = [100] * 15 + [105] * 5
-    df.loc[df.index[-1], CHANGE_RATE_COL] = 3.0
-    df[INSTITUTION_NET_AMOUNT_COL] = [0] * 17 + [40 * 100_000_000] * 3
-
-    result = P2Strategy().analyze(df)
-
-    assert result["is_p2"] is True
-    assert result["ma20_disparity"] <= 5.0
-    assert result["p2_stage"] == "초기포착"
-
-
 def test_p2_returns_false_when_price_rule_fails():
     df = _base_frame()
     df.loc[df.index[-1], CHANGE_RATE_COL] = 6.0
