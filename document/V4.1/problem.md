@@ -165,3 +165,41 @@ amount column * 1_000_000
 **가장 우선적인 수정안은 `KisClient + DataFetcher`를 V3의 “60일 일봉 + 일별 수급 결합” 흐름으로 복원하는 것입니다.**  
 UI 포맷터 분리 문제라기보다, 실전략 입력 데이터가 V3 수준으로 복원되지 않은 것이 본질입니다.
 
+2. 추가 pbs 구현 이후 전 종목이 분석 실패로 뜨는 문제 발생
+
+ - 원인 분석
+ 원인 찾았습니다. 코드는 수정하지 않았습니다.
+
+핵심 원인은 API 토큰 발급 쪽이 아니라, **API 응답을 DataFrame으로 합치는 단계**입니다.
+
+[Stock_Program_V4/core/data_fetcher.py](/c:/project/SW_assignment/Stock_Program_V4/core/data_fetcher.py)에서:
+
+- `_build_price_frame()`이 일봉 차트 응답을 DataFrame으로 만듭니다.
+- `_build_investor_frame()`이 투자자 응답을 DataFrame으로 만듭니다.
+- 그런데 둘 다 KIS 원본 컬럼 중 `prdy_vrss_sign`, `prdy_vrss`를 제거하거나 이름 변경하지 않고 그대로 들고 갑니다.
+- 이후 `_merge_frames()`에서 `price_df.join(investor_df, how="left")`를 실행하면서 양쪽에 같은 컬럼명이 있으니 pandas가 터집니다.
+
+즉 이 에러가 정확히 그 지점입니다:
+
+```text
+ValueError: columns overlap but no suffix specified:
+Index(['prdy_vrss_sign', 'prdy_vrss'], dtype='object')
+```
+
+그래서 P1/P2/P3 전략이 실패한 게 아니라, **전략 분석 전에 데이터 병합이 실패**합니다. [market_scanner.py](/c:/project/SW_assignment/Stock_Program_V4/core/market_scanner.py)는 종목별 예외를 잡아서 failure로 기록하므로, 200개 종목 모두 같은 병합 오류로 “분석 실패”가 된 겁니다.
+
+API 발급 알림이 안 뜨는 이유도 확인했습니다. [kis_token.json](/c:/project/SW_assignment/Stock_Program_V4/api/kis_token.json)에 캐시된 토큰 만료 시간이:
+
+```text
+2026-05-23 19:33:10
+```
+
+으로 남아 있습니다. [kis_client.py](/c:/project/SW_assignment/Stock_assignment/Stock_Program_V4/api/kis_client.py) 구조상 `_load_token()`이 유효한 캐시 토큰을 읽으면 `_token_is_valid()`가 true가 되고, `fetch_market_data()`에서 `refresh_token()`을 호출하지 않습니다. 그래서 “토큰 발급/갱신 알림”이 안 뜨는 건 정상 동작일 가능성이 큽니다.
+
+검증으로 관련 테스트는 실행해봤고 통과했습니다:
+
+```text
+6 passed
+```
+
+다만 현재 테스트 데이터에는 `prdy_vrss_sign`, `prdy_vrss` 중복 컬럼이 없어서 이 실 API 응답 케이스를 못 잡고 있습니다. 원인 요약은: **V3식 일봉 API로 바꾼 뒤 실제 KIS 응답에 포함된 공통 컬럼들이 price/investor 양쪽에 남았고, suffix 없이 join하면서 전체 스캔이 전부 실패한 것**입니다.

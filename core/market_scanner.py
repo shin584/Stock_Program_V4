@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import pandas as pd
 
-from ..api.kis_client import KisApiError
+from api.kis_client import KisApiError
 from .data_fetcher import (
     CHANGE_RATE_COL,
     CLOSE_COL,

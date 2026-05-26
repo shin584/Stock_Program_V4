@@ -10,17 +10,16 @@ import streamlit as st
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE_ROOT = PROJECT_ROOT.parent
-if str(WORKSPACE_ROOT) not in sys.path:
-    sys.path.insert(0, str(WORKSPACE_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from Stock_Program_V4.api.kis_client import KisClient
-from Stock_Program_V4.core.config import ConfigError, get_kis_config
-from Stock_Program_V4.core.data_fetcher import DataFetcher
-from Stock_Program_V4.core.market_scanner import MarketScanner
-from Stock_Program_V4.core.strategy import P1Strategy, P2Strategy, P3Strategy
-from Stock_Program_V4.core.utils import TickerLoadError, load_tickers
-from Stock_Program_V4.ui.formatters import format_failures, format_p1, format_p2, format_p3
+from api.kis_client import KisClient
+from core.config import ConfigError, get_kis_config
+from core.data_fetcher import DataFetcher
+from core.market_scanner import MarketScanner
+from core.strategy import P1Strategy, P2Strategy, P3Strategy
+from core.utils import TickerLoadError, load_tickers
+from ui.formatters import format_failures, format_p1, format_p2, format_p3
 
 
 class StreamlitUI:

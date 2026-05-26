@@ -180,3 +180,74 @@ P1, P2, P3 각각에 대해 통과(True)하는 케이스와 실패(False)하는 
 _to_float, _count_consecutive_positive, _numeric_sum 등의 은닉된(Private) 유틸리티 함수를 밖으로 빼내어 analyze 내부의 복잡도를 낮추고 응집도를 높인 점은 시니어급 설계입니다.
 
 반환값 역시 {"strategy": "P2", "is_p2": True, ...} 형태의 순수 Dictionary로 고정하여 데이터 결합도를 완벽히 통제했습니다.
+
+### PBS-4 준수 여부 체크리스트
+1. 의존성 주입 (DI) 및 SRP 준수 : ✅ 완벽함
+
+요구사항: MarketScanner 내부에서 DataFetcher() 등을 직접 생성(God Object 패턴)하지 말고, 생성자에서 주입받을 것. tickers.json 로드 로직은 유틸리티로 뺄 것.
+
+구현 확인:
+
+__init__ 메서드를 보면 data_fetcher: DataFetcher와 strategies: Sequence[SectorAnalysisStrategy]를 파라미터로 명확하게 주입(Inject)받고 있습니다. 내부에서 불필요한 객체 생성이 원천 차단되었습니다.
+
+종목 로드(파일 IO) 로직이 컨트롤러에서 완전히 삭제되었으며, run_scan 메서드는 외부에서 읽어온 데이터(tickers)만 파라미터로 받아 처리하도록 분리(SRP 준수)되었습니다.
+
+2. 예외 캐치 표준화 및 강인성(Robustness) : ✅ 완벽함
+
+요구사항: 튜플 반환 안티 패턴을 폐기하고, 워커 스레드(process_stock) 내부에서 하위 모듈의 예외(KisApiError, DataNotSufficientError)를 try-except로 캐치하여 스캔 중단 없이 failures 리스트로 격리할 것.
+
+구현 확인:
+
+_process_stock 내부가 견고한 try-except 블록으로 보호되어 있습니다.
+
+에러가 발생해도 시스템이 죽지 않고, { "ok": False, "failure": {...} } 형태의 명확한 상태 객체를 반환합니다.
+
+부모 스레드(run_scan)에서는 이를 받아 failures 리스트에 안전하게 쌓고 바로 다음 종목으로 넘어갑니다(continue). 완벽한 스레드 안전성(Thread Safety)을 확보했습니다.
+
+3. 섹터 집계 로직 (Rule 4 반영) : ✅ 완벽함
+
+요구사항: 스캔 결과를 바탕으로 P1/P2 종목이 가장 많은 상위 3개 섹터를 추출하는 aggregate_top_sectors() 메서드 구현.
+
+구현 확인:
+
+Pandas의 groupby, size, sort_values를 아주 우아하게 체이닝하여, P1이나 P2에 해당하는 종목(leaders = results_df[p1 | p2])을 섹터별로 정확하게 집계하고 상위 3개를 추출해냅니다.
+
+### PBS-5 준수 여부 체크리스트
+1. View 로직 완전 분리 (ViewModel 패턴 적용) : ✅ 완벽함
+
+요구사항: 비즈니스 로직 배제, 금액 단위 변환('억', '원') 로직을 포맷터 계층으로 분리할 것.
+
+구현 확인: app.py 내부에는 단 한 줄의 계산식도 없습니다. 모든 데이터 가공과 포맷팅은 새롭게 분리된 formatters.py에서 담당하며, UI는 오직 format_results가 예쁘게 포장해 준 결과물만 화면에 그립니다. 교과서적인 MVC/MVVM 패턴의 적용입니다.
+
+2. 필수 메서드 구현 (StreamlitUI 클래스) : ✅ 완벽함
+
+요구사항: StreamlitUI 클래스 구조를 활용하여 select_date(), click_scan(), render_results() 구현.
+
+구현 확인: 명시된 클래스와 세 가지 메서드가 정확히 구현되어 있으며, 컴포넌트 단위로 UI가 잘 모듈화되었습니다.
+
+3. 즉각적 피드백 (st.progress, st.spinner) : ✅ 완벽함
+
+요구사항: 멀티스레딩 스캔 중 시스템 상태를 사용자에게 투명하게 보여줄 것.
+
+구현 확인: st.spinner로 전체 스캔 상태를 감싸고, update_progress라는 콜백 함수를 만들어 MarketScanner에 넘겨주었습니다. 스레드가 하나씩 끝날 때마다 프로그레스 바가 실시간으로 차오르기 때문에 사용자가 답답함을 느끼지 않습니다.
+
+4. 예외 UI 표시 (강인성 시각화) : ✅ 완벽함
+
+요구사항: 분석 실패 종목 리스트(데이터 부족, 에러 등)를 보여줄 것.
+
+구현 확인: 에러 발생 시 프로그램이 멈추는 대신, failures 리스트를 모아 화면 하단 st.expander("실패 상세 보기") 영역에 깔끔하게 표출합니다.
+
+5. 의존성 조립 (Composition Root) - 💡 핵심 포인트 : ✅ 완벽함
+
+요구사항: 애플리케이션 진입점으로서 모든 모듈을 생성하고 MarketScanner에 주입(DI)할 것.
+
+구현 확인: @st.cache_resource가 적용된 build_scanner() 함수가 그 역할을 완벽히 수행합니다!
+
+get_kis_config()로 설정을 불러오고,
+
+KisClient 싱글톤을 초기화한 뒤,
+
+DataFetcher에 주입하고,
+
+3가지 전략과 함께 최종적으로 MarketScanner를 조립해 냅니다.
+Streamlit의 캐싱 기능을 활용하여 매번 새로 객체를 만들지 않도록 최적화한 점은 시니어급 프론트엔드 스킬입니다.

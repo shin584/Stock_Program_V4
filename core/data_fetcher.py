@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import pandas as pd
 
 from .config import get_kis_config
-from ..api.kis_client import KisClient
+from api.kis_client import KisClient
 
 
 DATE_COL = "\uc77c\uc790"
