@@ -13,7 +13,22 @@ REQUIRED_SECRET_KEYS = ("APP_KEY", "APP_SECRET", "ACCOUNT_NO")
 
 
 def load_secrets(file_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Load and validate secrets.json with fail-fast error handling."""
+    """Load and validate secrets with fail-fast error handling."""
+    # 1. Streamlit Cloud의 st.secrets 확인
+    try:
+        import streamlit as st
+        # st.secrets에 모든 필수 키가 있는지 확인
+        if all(key in st.secrets for key in REQUIRED_SECRET_KEYS):
+            return {
+                "APP_KEY": st.secrets["APP_KEY"],
+                "APP_SECRET": st.secrets["APP_SECRET"],
+                "ACCOUNT_NO": st.secrets["ACCOUNT_NO"],
+                "MOCK": st.secrets.get("MOCK", False)
+            }
+    except Exception:
+        pass # 로컬 환경에서 Streamlit 없이 실행하거나, 시크릿이 없을 때는 파일 읽기로 넘어감
+
+    # 2. 로컬의 secrets.json 파일 읽기
     secrets_path = Path(file_path) if file_path is not None else SECRETS_FILE
 
     if not secrets_path.exists():
