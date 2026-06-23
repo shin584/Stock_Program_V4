@@ -1,0 +1,43 @@
+from unittest.mock import Mock
+
+import pytest
+
+from Stock_Program_V4.core import market_data_facade as facade_module
+from Stock_Program_V4.core.market_data_facade import MarketDataFacade, MarketDataFacadeError
+from Stock_Program_V4.core.market_universe import MarketUniverse
+
+
+def test_fetch_latest_universe_returns_market_universe_from_pykrx(monkeypatch):
+    authenticator = Mock()
+    stock_mock = Mock()
+    stock_mock.get_index_portfolio_deposit_file.side_effect = [
+        ["005930", "000660"],
+        ["091990", "035900"],
+    ]
+    monkeypatch.setattr(facade_module, "stock", stock_mock)
+
+    universe = MarketDataFacade(authenticator=authenticator).fetch_latest_universe()
+
+    assert isinstance(universe, MarketUniverse)
+    assert universe.kospi200_tickers == frozenset({"005930", "000660"})
+    assert universe.kosdaq150_tickers == frozenset({"091990", "035900"})
+    assert universe.get_all_tickers() == frozenset(
+        {"005930", "000660", "091990", "035900"}
+    )
+    stock_mock.get_index_portfolio_deposit_file.assert_any_call("1028")
+    stock_mock.get_index_portfolio_deposit_file.assert_any_call("2046")
+    authenticator.authenticate.assert_called_once_with()
+
+
+def test_fetch_latest_universe_wraps_pykrx_failures(monkeypatch):
+    authenticator = Mock()
+    stock_mock = Mock()
+    stock_mock.get_index_portfolio_deposit_file.side_effect = RuntimeError(
+        "network failed"
+    )
+    monkeypatch.setattr(facade_module, "stock", stock_mock)
+
+    with pytest.raises(MarketDataFacadeError) as exc_info:
+        MarketDataFacade(authenticator=authenticator).fetch_latest_universe()
+
+    assert "Unable to fetch latest market universe" in str(exc_info.value)

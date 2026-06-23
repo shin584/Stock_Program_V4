@@ -1,8 +1,9 @@
-import json
 import datetime
+from unittest.mock import Mock
 
 import pandas as pd
 
+from Stock_Program_V4.core.market_universe import MarketUniverse
 from Stock_Program_V4.core.data_fetcher import (
     CHANGE_RATE_COL,
     CLOSE_COL,
@@ -134,27 +135,33 @@ def test_run_scan_passes_target_date_to_data_fetcher():
     assert fetcher.requested_target_dates == [target_date, target_date]
 
 
-def test_load_tickers_loads_kospi_and_kosdaq_without_market_input(tmp_path, monkeypatch):
-    tickers_path = tmp_path / "tickers.json"
-    tickers_path.write_text(
-        json.dumps(
-            [
-                {"code": "000001", "name": "Alpha", "market": "KOSPI"},
-                {"code": "000003", "name": "Gamma", "market": "KOSPI"},
-                {"code": "000002", "name": "Beta", "market": "KOSDAQ"},
-                {"code": "000004", "name": "Delta", "market": "KOSDAQ"},
-            ]
-        ),
-        encoding="utf-8",
+def test_load_tickers_loads_kospi_and_kosdaq_without_market_input(monkeypatch):
+    universe = MarketUniverse(
+        kospi200_tickers={"000001", "000003"},
+        kosdaq150_tickers={"000002", "000004"},
     )
+    manager = Mock()
+    manager.get_universe.return_value = universe
+    monkeypatch.setattr(utils_module, "UniverseStateManager", Mock(return_value=manager))
 
-    monkeypatch.setattr(utils_module, "DEFAULT_TICKERS_FILE", tickers_path)
+    stock_mock = Mock()
+    stock_mock.get_market_cap.side_effect = [
+        pd.DataFrame({"시가총액": [2_000, 1_000]}, index=["000001", "000003"]),
+        pd.DataFrame({"시가총액": [1_500, 500]}, index=["000002", "000004"]),
+    ]
+    stock_mock.get_market_ticker_name.side_effect = lambda code: {
+        "000001": "Alpha",
+        "000002": "Beta",
+        "000003": "Gamma",
+        "000004": "Delta",
+    }[code]
+    monkeypatch.setattr(utils_module, "stock", stock_mock)
 
     tickers = load_tickers(top_n=1)
 
     assert tickers.to_dict(orient="records") == [
-        {"code": "000001", "name": "Alpha", "market": "KOSPI"},
-        {"code": "000002", "name": "Beta", "market": "KOSDAQ"},
+        {"code": "000001", "name": "Alpha", "market": "KOSPI", "cap": 2_000},
+        {"code": "000002", "name": "Beta", "market": "KOSDAQ", "cap": 1_500},
     ]
 
 r'''

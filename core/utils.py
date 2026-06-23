@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any, Dict, List
+from datetime import date
 
 import pandas as pd
 
+from .market_universe import MarketUniverse
+from .universe_state_manager import UniverseStateManager
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TICKERS_FILE = PROJECT_ROOT / "tickers.json"
+
 SCAN_MARKETS = ("KOSPI", "KOSDAQ")
+TICKER_COLUMNS = ["code", "name", "market", "cap"]
+MARKET_CAP_COLUMN = "시가총액"
+stock = None
+_universe_state_manager: UniverseStateManager | None = None
 
 
 class TickerLoadError(Exception):
@@ -17,37 +20,107 @@ class TickerLoadError(Exception):
 
 
 def load_tickers(top_n: int = 100) -> pd.DataFrame:
-    """Load top KOSPI and KOSDAQ tickers as one scan-ready DataFrame."""
+    """Load top KOSPI 200 and KOSDAQ 150 tickers as one scan-ready DataFrame."""
     if top_n < 1:
         raise TickerLoadError("top_n must be at least 1.")
 
-    data = _read_ticker_data(DEFAULT_TICKERS_FILE)
-    tickers = pd.DataFrame(data)
-    if tickers.empty:
-        return tickers
-    if "market" not in tickers.columns:
-        raise TickerLoadError("Ticker data must include a 'market' column.")
+    universe = _get_universe_state_manager().get_universe()
+    stock_module = _get_stock_module()
+    today = date.today().strftime("%Y%m%d")
 
     market_frames = []
-    for market in SCAN_MARKETS:
-        market_tickers = tickers[tickers["market"] == market]
-        market_frames.append(market_tickers.head(top_n).copy())
+    for market, tickers in _iter_market_tickers(universe):
+        market_frames.append(
+            _build_market_frame(stock_module, today, market, tickers, top_n)
+        )
 
-    return pd.concat(market_frames, ignore_index=True)
+    if not market_frames:
+        return pd.DataFrame(columns=TICKER_COLUMNS)
+
+    return (
+        pd.concat(market_frames, ignore_index=True)
+        .sort_values(by="cap", ascending=False)
+        .reset_index(drop=True)
+    )
 
 
-def _read_ticker_data(tickers_path: Path) -> List[Dict[str, Any]]:
-    if not tickers_path.exists():
-        raise TickerLoadError(f"Ticker file not found: {tickers_path}")
+def _iter_market_tickers(universe: MarketUniverse) -> tuple[tuple[str, frozenset[str]], ...]:
+    return (
+        ("KOSPI", universe.kospi200_tickers),
+        ("KOSDAQ", universe.kosdaq150_tickers),
+    )
+
+
+def _build_market_frame(
+    stock_module: object,
+    trading_date: str,
+    market: str,
+    universe_tickers: frozenset[str],
+    top_n: int,
+) -> pd.DataFrame:
+    if not universe_tickers:
+        return pd.DataFrame(columns=TICKER_COLUMNS)
 
     try:
-        with tickers_path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except json.JSONDecodeError as exc:
-        raise TickerLoadError(f"Ticker file contains invalid JSON: {tickers_path}") from exc
-    except OSError as exc:
-        raise TickerLoadError(f"Unable to read ticker file: {tickers_path}") from exc
+        cap_data = stock_module.get_market_cap(trading_date, market=market)
+    except Exception as exc:
+        raise TickerLoadError(f"Unable to load market cap data for {market}.") from exc
 
-    if not isinstance(data, list):
-        raise TickerLoadError("Ticker file must contain a JSON array.")
-    return data
+    cap_frame = _normalize_market_cap_frame(cap_data)
+    if cap_frame.empty:
+        return pd.DataFrame(columns=TICKER_COLUMNS)
+
+    filtered = cap_frame[cap_frame["code"].isin(universe_tickers)].copy()
+    if filtered.empty:
+        return pd.DataFrame(columns=TICKER_COLUMNS)
+
+    filtered["market"] = market
+    filtered["name"] = filtered["code"].map(
+        lambda ticker: _get_ticker_name(stock_module, ticker)
+    )
+    return (
+        filtered.sort_values(by="cap", ascending=False)
+        .head(top_n)
+        .loc[:, TICKER_COLUMNS]
+        .reset_index(drop=True)
+    )
+
+
+def _normalize_market_cap_frame(cap_data: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(cap_data, pd.DataFrame):
+        raise TickerLoadError("Market cap data must be a pandas DataFrame.")
+
+    if MARKET_CAP_COLUMN not in cap_data.columns:
+        raise TickerLoadError(f"Market cap data must include '{MARKET_CAP_COLUMN}'.")
+
+    cap_frame = cap_data.copy()
+    cap_frame["code"] = cap_frame.index.astype(str)
+    cap_frame["cap"] = pd.to_numeric(cap_frame[MARKET_CAP_COLUMN], errors="coerce").fillna(0)
+    return cap_frame.loc[:, ["code", "cap"]]
+
+
+def _get_stock_module() -> object:
+    if stock is not None:
+        return stock
+
+    try:
+        from pykrx import stock as pykrx_stock
+    except ImportError as exc:
+        raise TickerLoadError("pykrx is not installed.") from exc
+
+    return pykrx_stock
+
+
+def _get_universe_state_manager() -> UniverseStateManager:
+    global _universe_state_manager
+
+    if _universe_state_manager is None:
+        _universe_state_manager = UniverseStateManager()
+    return _universe_state_manager
+
+
+def _get_ticker_name(stock_module: object, ticker: str) -> str:
+    try:
+        return stock_module.get_market_ticker_name(ticker)
+    except Exception as exc:
+        raise TickerLoadError(f"Unable to load ticker name for {ticker}.") from exc
