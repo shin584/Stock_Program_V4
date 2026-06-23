@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+try:
+    from pykrx import stock
+except ImportError:  # pragma: no cover - covered through runtime error path.
+    stock = None
+
+from .market_universe import MarketUniverse
+
+
+KOSPI200_INDEX_CODE = "1028"
+KOSDAQ150_INDEX_CODE = "2046"
+
+
+class MarketDataFacadeError(Exception):
+    """Raised when external market data cannot be fetched."""
+
+
+class MarketDataFacade:
+    """Facade for market data provided by pykrx."""
+
+    def fetch_latest_universe(self) -> MarketUniverse:
+        if stock is None:
+            raise MarketDataFacadeError("pykrx is not installed.")
+
+        try:
+            kospi200_tickers = stock.get_index_portfolio_deposit_file(
+                KOSPI200_INDEX_CODE
+            )
+            kosdaq150_tickers = stock.get_index_portfolio_deposit_file(
+                KOSDAQ150_INDEX_CODE
+            )
+        except Exception as exc:
+            raise MarketDataFacadeError(
+                "Unable to fetch latest market universe from pykrx."
+            ) from exc
+
+        return MarketUniverse(
+            kospi200_tickers=kospi200_tickers,
+            kosdaq150_tickers=kosdaq150_tickers,
+        )

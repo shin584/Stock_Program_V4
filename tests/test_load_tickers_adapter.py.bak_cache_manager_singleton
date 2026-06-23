@@ -1,0 +1,61 @@
+from unittest.mock import Mock
+
+import pandas as pd
+
+from Stock_Program_V4.core import utils as utils_module
+from Stock_Program_V4.core.market_universe import MarketUniverse
+from Stock_Program_V4.core.utils import load_tickers
+
+
+def test_load_tickers_returns_scan_ready_dataframe_sorted_by_cap(monkeypatch):
+    universe = MarketUniverse(
+        kospi200_tickers={"005930", "000660", "373220"},
+        kosdaq150_tickers={"091990", "035900", "145020"},
+    )
+    manager = Mock()
+    manager.get_universe.return_value = universe
+    manager_class = Mock(return_value=manager)
+    monkeypatch.setattr(utils_module, "UniverseStateManager", manager_class)
+
+    stock_mock = Mock()
+    stock_mock.get_market_cap.side_effect = [
+        pd.DataFrame(
+            {"시가총액": [300, 500, 100]},
+            index=["005930", "000660", "373220"],
+        ),
+        pd.DataFrame(
+            {"시가총액": [250, 450, 150]},
+            index=["091990", "035900", "145020"],
+        ),
+    ]
+    stock_mock.get_market_ticker_name.side_effect = lambda code: {
+        "005930": "Samsung Electronics",
+        "000660": "SK hynix",
+        "373220": "LG Energy Solution",
+        "091990": "Celltrion Healthcare",
+        "035900": "JYP Ent.",
+        "145020": "Hugel",
+    }[code]
+    monkeypatch.setattr(utils_module, "stock", stock_mock)
+
+    tickers = load_tickers(top_n=2)
+
+    assert list(tickers.columns) == ["code", "name", "market", "cap"]
+    assert tickers["cap"].is_monotonic_decreasing
+    assert tickers.to_dict(orient="records") == [
+        {"code": "000660", "name": "SK hynix", "market": "KOSPI", "cap": 500},
+        {"code": "035900", "name": "JYP Ent.", "market": "KOSDAQ", "cap": 450},
+        {
+            "code": "005930",
+            "name": "Samsung Electronics",
+            "market": "KOSPI",
+            "cap": 300,
+        },
+        {
+            "code": "091990",
+            "name": "Celltrion Healthcare",
+            "market": "KOSDAQ",
+            "cap": 250,
+        },
+    ]
+    assert manager.get_universe.call_count == 1
